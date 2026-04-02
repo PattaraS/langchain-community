@@ -314,6 +314,12 @@ def _import_minimax() -> Type[BaseLLM]:
     return Minimax
 
 
+def _import_mlflow_gateway() -> Type[BaseLLM]:
+    from langchain_community.llms.mlflow import MLflowGateway
+
+    return MLflowGateway
+
+
 def _import_mlflow() -> Type[BaseLLM]:
     from langchain_community.llms.mlflow import Mlflow
 
@@ -325,15 +331,15 @@ def _import_mlflow_chat() -> Any:
     warn_deprecated(
         since="0.0.22",
         removal="1.0",
-        alternative_import="langchain_community.chat_models.ChatMlflow",
+        alternative_import="langchain_community.chat_models.ChatMLflowGateway",
     )
-    from langchain_community.chat_models.mlflow import ChatMlflow
+    from langchain_community.chat_models.mlflow import ChatMLflowGateway
 
-    return ChatMlflow
+    return ChatMLflowGateway
 
 
 def _import_mlflow_ai_gateway() -> Type[BaseLLM]:
-    from langchain_community.llms.mlflow_ai_gateway import MlflowAIGateway
+    from langchain_community.llms.mlflow import MLflowGateway
 
     return MlflowAIGateway
 
@@ -757,6 +763,8 @@ def __getattr__(name: str) -> Any:
         return _import_manifest()
     elif name == "Minimax":
         return _import_minimax()
+    elif name == "MLflowGateway":
+        return _import_mlflow_gateway()
     elif name == "Mlflow":
         return _import_mlflow()
     elif name == "MlflowAIGateway":
@@ -922,6 +930,7 @@ __all__ = [
     "Llamafile",
     "ManifestWrapper",
     "Minimax",
+    "MLflowGateway",
     "Mlflow",
     "MlflowAIGateway",
     "MLXPipeline",
@@ -1024,9 +1033,10 @@ def get_type_to_cls_dict() -> Dict[str, Callable[[], Type[BaseLLM]]]:
         "llamafile": _import_llamafile,
         "textgen": _import_textgen,
         "minimax": _import_minimax,
-        "mlflow": _import_mlflow,
+        "mlflow-gateway": _import_mlflow_gateway,
+        "mlflow": _import_mlflow,  # deprecated alias
         "mlflow-chat": _import_mlflow_chat,  # deprecated / only for back compat
-        "mlflow-ai-gateway": _import_mlflow_ai_gateway,
+        "mlflow-ai-gateway": _import_mlflow_ai_gateway,  # deprecated
         "mlx_pipeline": _import_mlx_pipeline,
         "modal": _import_modal,
         "mosaic": _import_mosaicml,

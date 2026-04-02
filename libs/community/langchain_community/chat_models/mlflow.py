@@ -1,5 +1,6 @@
 import json
 import logging
+import warnings
 from typing import (
     Any,
     Callable,
@@ -54,38 +55,55 @@ from pydantic import (
 logger = logging.getLogger(__name__)
 
 
-class ChatMlflow(BaseChatModel):
-    """`MLflow` chat models API.
+class ChatMLflowGateway(BaseChatModel):
+    """`MLflow AI Gateway` chat model.
 
-    To use, you should have the `mlflow[genai]` python package installed.
-    For more information, see https://mlflow.org/docs/latest/llms/deployments.
+    MLflow AI Gateway is a database-backed LLM proxy built into the MLflow
+    tracking server (MLflow >= 3.0). It provides a unified API across multiple
+    LLM providers with built-in secrets management, fallback/retry, traffic
+    splitting, and usage tracing — all configured through the MLflow UI.
+
+    To use, you should have the ``mlflow[genai]`` python package installed.
+    For more information, see https://mlflow.org/docs/latest/llms/gateway/index.html.
+
+    Setup:
+
+        Start an MLflow server and create a gateway endpoint in the UI::
+
+            mlflow server --host 127.0.0.1 --port 5000
+
+        Then open http://localhost:5000, navigate to **AI Gateway → Create Endpoint**,
+        and configure a provider (e.g. OpenAI, Anthropic). Provider API keys are
+        stored encrypted on the server.
 
     Example:
+
         .. code-block:: python
 
-            from langchain_community.chat_models import ChatMlflow
+            from langchain_community.chat_models import ChatMLflowGateway
 
-            chat = ChatMlflow(
+            chat = ChatMLflowGateway(
                 target_uri="http://localhost:5000",
-                endpoint="chat",
+                endpoint="my-chat-endpoint",
                 temperature=0.1,
             )
+            chat.invoke("What is MLflow AI Gateway?")
     """
 
     endpoint: str
-    """The endpoint to use."""
+    """The MLflow Gateway endpoint name to use."""
     target_uri: str
-    """The target URI to use."""
+    """The MLflow tracking server URI (e.g. ``http://localhost:5000``)."""
     temperature: float = 0.0
-    """The sampling temperature."""
+    """Sampling temperature."""
     n: int = 1
-    """The number of completion choices to generate."""
+    """Number of completion choices to generate."""
     stop: Optional[List[str]] = None
-    """The stop sequence."""
+    """Stop sequences."""
     max_tokens: Optional[int] = None
-    """The maximum number of tokens to generate."""
+    """Maximum number of tokens to generate."""
     extra_params: dict = Field(default_factory=dict)
-    """Any extra parameters to pass to the endpoint."""
+    """Any extra parameters to pass through to the endpoint."""
     _client: Any = PrivateAttr()
 
     def __init__(self, **kwargs: Any):
@@ -97,8 +115,8 @@ class ChatMlflow(BaseChatModel):
             self._client = get_deploy_client(self.target_uri)
         except ImportError as e:
             raise ImportError(
-                "Failed to create the client. "
-                f"Please run `pip install mlflow{self._mlflow_extras}` to install "
+                "Failed to create the MLflow deployments client. "
+                "Please run `pip install mlflow[genai]` to install "
                 "required dependencies."
             ) from e
 
@@ -136,7 +154,7 @@ class ChatMlflow(BaseChatModel):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         message_dicts = [
-            ChatMlflow._convert_message_to_dict(message) for message in messages
+            ChatMLflowGateway._convert_message_to_dict(message) for message in messages
         ]
         data: Dict[str, Any] = {
             "messages": message_dicts,
@@ -159,13 +177,9 @@ class ChatMlflow(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        data = self._prepare_inputs(
-            messages,
-            stop,
-            **kwargs,
-        )
+        data = self._prepare_inputs(messages, stop, **kwargs)
         resp = self._client.predict(endpoint=self.endpoint, inputs=data)
-        return ChatMlflow._create_chat_result(resp)
+        return ChatMLflowGateway._create_chat_result(resp)
 
     def stream(
         self,
@@ -175,11 +189,8 @@ class ChatMlflow(BaseChatModel):
         stop: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Iterator[AIMessageChunk]:
-        # We need to override `stream` to handle the case
-        # that `self._client` does not implement `predict_stream`
+        # Fall back to non-streaming invoke if the client does not support streaming.
         if not hasattr(self._client, "predict_stream"):
-            # MLflow deployment client does not implement streaming,
-            # so use default implementation
             yield cast(
                 AIMessageChunk, self.invoke(input, config=config, stop=stop, **kwargs)
             )
@@ -193,23 +204,17 @@ class ChatMlflow(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        data = self._prepare_inputs(
-            messages,
-            stop,
-            **kwargs,
-        )
-        # TODO: check if `_client.predict_stream` is available.
+        data = self._prepare_inputs(messages, stop, **kwargs)
         chunk_iter = self._client.predict_stream(endpoint=self.endpoint, inputs=data)
         first_chunk_role = None
         for chunk in chunk_iter:
             if chunk["choices"]:
                 choice = chunk["choices"][0]
-
                 chunk_delta = choice["delta"]
                 if first_chunk_role is None:
                     first_chunk_role = chunk_delta.get("role")
 
-                chunk_message = ChatMlflow._convert_delta_to_message_chunk(
+                chunk_message = ChatMLflowGateway._convert_delta_to_message_chunk(
                     chunk_delta, first_chunk_role
                 )
 
@@ -219,19 +224,18 @@ class ChatMlflow(BaseChatModel):
                 if logprobs := choice.get("logprobs"):
                     generation_info["logprobs"] = logprobs
 
-                chunk = ChatGenerationChunk(
+                gen_chunk = ChatGenerationChunk(
                     message=chunk_message, generation_info=generation_info or None
                 )
 
                 if run_manager:
                     run_manager.on_llm_new_token(
-                        chunk.text, chunk=chunk, logprobs=logprobs
+                        gen_chunk.text,
+                        chunk=gen_chunk,
+                        logprobs=generation_info.get("logprobs"),
                     )
 
-                yield chunk
-            else:
-                # Handle the case where choices are empty if needed
-                continue
+                yield gen_chunk
 
     @property
     def _identifying_params(self) -> Dict[str, Any]:
@@ -240,7 +244,6 @@ class ChatMlflow(BaseChatModel):
     def _get_invocation_params(
         self, stop: Optional[List[str]] = None, **kwargs: Any
     ) -> Dict[str, Any]:
-        """Get the parameters used to invoke the model FOR THE CALLBACKS."""
         return {
             **self._default_params,
             **super()._get_invocation_params(stop=stop, **kwargs),
@@ -248,8 +251,7 @@ class ChatMlflow(BaseChatModel):
 
     @property
     def _llm_type(self) -> str:
-        """Return type of chat model."""
-        return "mlflow-chat"
+        return "mlflow-gateway-chat"
 
     @staticmethod
     def _convert_dict_to_message(_dict: Mapping[str, Any]) -> BaseMessage:
@@ -326,15 +328,8 @@ class ChatMlflow(BaseChatModel):
             return ChatMessageChunk(content=content, role=role)
 
     @staticmethod
-    def _raise_functions_not_supported() -> None:
-        raise ValueError(
-            "Function messages are not supported by Databricks. Please"
-            " create a feature request at https://github.com/mlflow/mlflow/issues."
-        )
-
-    @staticmethod
     def _convert_message_to_dict(message: BaseMessage) -> dict:
-        message_dict = {"content": message.content}
+        message_dict: Dict[str, Any] = {"content": message.content}
         if (name := message.name or message.additional_kwargs.get("name")) is not None:
             message_dict["name"] = name
         if isinstance(message, ChatMessage):
@@ -349,54 +344,43 @@ class ChatMlflow(BaseChatModel):
                 ] + [
                     _lc_invalid_tool_call_to_openai_tool_call(tc)
                     for tc in message.invalid_tool_calls
-                ]  # type: ignore[assignment]
+                ]
             elif "tool_calls" in message.additional_kwargs:
                 message_dict["tool_calls"] = message.additional_kwargs["tool_calls"]
                 tool_call_supported_props = {"id", "type", "function"}
                 message_dict["tool_calls"] = [
-                    {
-                        k: v
-                        for k, v in tool_call.items()  # type: ignore[union-attr]
-                        if k in tool_call_supported_props
-                    }
-                    for tool_call in message_dict["tool_calls"]
+                    {k: v for k, v in tc.items() if k in tool_call_supported_props}
+                    for tc in message_dict["tool_calls"]
                 ]
-            else:
-                pass
-            # If tool calls present, content null value should be None not empty string.
             if "tool_calls" in message_dict:
-                message_dict["content"] = message_dict["content"] or None  # type: ignore[assignment]
+                message_dict["content"] = message_dict["content"] or None
         elif isinstance(message, SystemMessage):
             message_dict["role"] = "system"
         elif isinstance(message, ToolMessage):
             message_dict["role"] = "tool"
             message_dict["tool_call_id"] = message.tool_call_id
             supported_props = {"content", "role", "tool_call_id"}
-            message_dict = {
-                k: v for k, v in message_dict.items() if k in supported_props
-            }
+            message_dict = {k: v for k, v in message_dict.items() if k in supported_props}
         elif isinstance(message, FunctionMessage):
             raise ValueError(
-                "Function messages are not supported by Databricks. Please"
-                " create a feature request at https://github.com/mlflow/mlflow/issues."
+                "FunctionMessage is not supported. Please use ToolMessage instead."
             )
         else:
             raise ValueError(f"Got unknown message type: {message}")
 
         if "function_call" in message.additional_kwargs:
-            ChatMlflow._raise_functions_not_supported()
+            raise ValueError(
+                "function_call is not supported. Please use tool_calls instead."
+            )
         return message_dict
 
     @staticmethod
     def _create_chat_result(response: Mapping[str, Any]) -> ChatResult:
         generations = []
         for choice in response["choices"]:
-            message = ChatMlflow._convert_dict_to_message(choice["message"])
+            message = ChatMLflowGateway._convert_dict_to_message(choice["message"])
             usage = choice.get("usage", {})
-            gen = ChatGeneration(
-                message=message,
-                generation_info=usage,
-            )
+            gen = ChatGeneration(message=message, generation_info=usage)
             generations.append(gen)
 
         usage = response.get("usage", {})
@@ -413,31 +397,20 @@ class ChatMlflow(BaseChatModel):
     ) -> Runnable[LanguageModelInput, AIMessage]:
         """Bind tool-like objects to this chat model.
 
-        Assumes model is compatible with OpenAI tool-calling API.
+        Assumes the endpoint is compatible with the OpenAI tool-calling API.
 
         Args:
-            tools: A list of tool definitions to bind to this chat model.
-                Can be  a dictionary, pydantic model, callable, or BaseTool. Pydantic
-                models, callables, and BaseTools will be automatically converted to
-                their schema dictionary representation.
+            tools: A list of tool definitions to bind. Can be a dictionary,
+                pydantic model, callable, or BaseTool.
             tool_choice: Which tool to require the model to call.
-                Options are:
-                name of the tool (str): calls corresponding tool;
-                "auto": automatically selects a tool (including no tool);
-                "none": model does not generate any tool calls and instead must
-                    generate a standard assistant message;
-                "required": the model picks the most relevant tool in tools and
-                    must generate a tool call;
-
-                or a dict of the form:
-                {"type": "function", "function": {"name": <<tool_name>>}}.
-            **kwargs: Any additional parameters to pass to the
-                :class:`~langchain.runnable.Runnable` constructor.
+                Options: tool name (str), ``"auto"``, ``"none"``, ``"required"``,
+                or a dict of the form
+                ``{"type": "function", "function": {"name": <tool_name>}}``.
+            **kwargs: Additional parameters passed to the Runnable constructor.
         """
         formatted_tools = [convert_to_openai_tool(tool) for tool in tools]
         if tool_choice:
             if isinstance(tool_choice, str):
-                # tool_choice is a tool/function name
                 if tool_choice not in ("auto", "none", "required"):
                     tool_choice = {
                         "type": "function",
@@ -445,8 +418,7 @@ class ChatMlflow(BaseChatModel):
                     }
             elif isinstance(tool_choice, dict):
                 tool_names = [
-                    formatted_tool["function"]["name"]
-                    for formatted_tool in formatted_tools
+                    t["function"]["name"] for t in formatted_tools
                 ]
                 if not any(
                     tool_name == tool_choice["function"]["name"]
@@ -463,6 +435,20 @@ class ChatMlflow(BaseChatModel):
                 )
             kwargs["tool_choice"] = tool_choice
         return super().bind(tools=formatted_tools, **kwargs)
+
+
+class ChatMlflow(ChatMLflowGateway):
+    """Deprecated. Use :class:`ChatMLflowGateway` instead."""
+
+    def __init__(self, **kwargs: Any):
+        warnings.warn(
+            "`ChatMlflow` has been renamed to `ChatMLflowGateway`. "
+            "Please update your code: `from langchain_community.chat_models "
+            "import ChatMLflowGateway`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(**kwargs)
 
 
 def _lc_tool_call_to_openai_tool_call(tool_call: ToolCall) -> dict:

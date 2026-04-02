@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urlparse
 
@@ -8,40 +9,57 @@ from langchain_core.language_models import LLM
 from pydantic import Field, PrivateAttr
 
 
-class Mlflow(LLM):
-    """MLflow LLM service.
+class MLflowGateway(LLM):
+    """`MLflow AI Gateway` LLM (text completions).
 
-    To use, you should have the `mlflow[genai]` python package installed.
-    For more information, see https://mlflow.org/docs/latest/llms/deployments.
+    MLflow AI Gateway is a database-backed LLM proxy built into the MLflow
+    tracking server (MLflow >= 3.0). It provides a unified API across multiple
+    LLM providers with built-in secrets management, fallback/retry, traffic
+    splitting, and usage tracing — all configured through the MLflow UI.
+
+    To use, you should have the ``mlflow[genai]`` python package installed.
+    For more information, see https://mlflow.org/docs/latest/llms/gateway/index.html.
+
+    .. note::
+        For chat-based models prefer :class:`~langchain_community.chat_models.ChatMLflowGateway`.
+
+    Setup:
+
+        Start an MLflow server and create a gateway endpoint in the UI::
+
+            mlflow server --host 127.0.0.1 --port 5000
+
+        Then open http://localhost:5000, navigate to **AI Gateway → Create Endpoint**,
+        and configure a provider. Provider API keys are stored encrypted on the server.
 
     Example:
+
         .. code-block:: python
 
-            from langchain_community.llms import Mlflow
+            from langchain_community.llms import MLflowGateway
 
-            completions = Mlflow(
+            llm = MLflowGateway(
                 target_uri="http://localhost:5000",
-                endpoint="test",
+                endpoint="my-completions-endpoint",
                 temperature=0.1,
             )
+            llm.invoke("Explain MLflow AI Gateway in one sentence.")
     """
 
     endpoint: str
-    """The endpoint to use."""
+    """The MLflow Gateway endpoint name to use."""
     target_uri: str
-    """The target URI to use."""
+    """The MLflow tracking server URI (e.g. ``http://localhost:5000``)."""
     temperature: float = 0.0
-    """The sampling temperature."""
+    """Sampling temperature."""
     n: int = 1
-    """The number of completion choices to generate."""
+    """Number of completion choices to generate."""
     stop: Optional[List[str]] = None
-    """The stop sequence."""
+    """Stop sequences."""
     max_tokens: Optional[int] = None
-    """The maximum number of tokens to generate."""
+    """Maximum number of tokens to generate."""
     extra_params: Dict[str, Any] = Field(default_factory=dict)
-    """Any extra parameters to pass to the endpoint."""
-
-    """Extra parameters such as `temperature`."""
+    """Any extra parameters to pass through to the endpoint."""
     _client: Any = PrivateAttr()
 
     def __init__(self, **kwargs: Any):
@@ -53,7 +71,7 @@ class Mlflow(LLM):
             self._client = get_deploy_client(self.target_uri)
         except ImportError as e:
             raise ImportError(
-                "Failed to create the client. "
+                "Failed to create the MLflow deployments client. "
                 "Please run `pip install mlflow[genai]` to install "
                 "required dependencies."
             ) from e
@@ -108,4 +126,18 @@ class Mlflow(LLM):
 
     @property
     def _llm_type(self) -> str:
-        return "mlflow"
+        return "mlflow-gateway"
+
+
+class Mlflow(MLflowGateway):
+    """Deprecated. Use :class:`MLflowGateway` instead."""
+
+    def __init__(self, **kwargs: Any):
+        warnings.warn(
+            "`Mlflow` has been renamed to `MLflowGateway`. "
+            "Please update your code: `from langchain_community.llms "
+            "import MLflowGateway`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(**kwargs)

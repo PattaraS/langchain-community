@@ -142,11 +142,10 @@ if TYPE_CHECKING:
         MiniMaxEmbeddings,
     )
     from langchain_community.embeddings.mlflow import (
-        MlflowCohereEmbeddings,
+        MLflowGatewayEmbeddings,
+        MLflowGatewayCohereEmbeddings,
         MlflowEmbeddings,
-    )
-    from langchain_community.embeddings.mlflow_gateway import (
-        MlflowAIGatewayEmbeddings,
+        MlflowCohereEmbeddings,
     )
     from langchain_community.embeddings.model2vec import (
         Model2vecEmbeddings,
@@ -292,7 +291,8 @@ __all__ = [
     "LlamafileEmbeddings",
     "LocalAIEmbeddings",
     "MiniMaxEmbeddings",
-    "MlflowAIGatewayEmbeddings",
+    "MLflowGatewayEmbeddings",
+    "MLflowGatewayCohereEmbeddings",
     "MlflowCohereEmbeddings",
     "MlflowEmbeddings",
     "Model2vecEmbeddings",
@@ -377,7 +377,8 @@ _module_lookup = {
     "LlamafileEmbeddings": "langchain_community.embeddings.llamafile",
     "LocalAIEmbeddings": "langchain_community.embeddings.localai",
     "MiniMaxEmbeddings": "langchain_community.embeddings.minimax",
-    "MlflowAIGatewayEmbeddings": "langchain_community.embeddings.mlflow_gateway",
+    "MLflowGatewayEmbeddings": "langchain_community.embeddings.mlflow",
+    "MLflowGatewayCohereEmbeddings": "langchain_community.embeddings.mlflow",
     "MlflowCohereEmbeddings": "langchain_community.embeddings.mlflow",
     "MlflowEmbeddings": "langchain_community.embeddings.mlflow",
     "Model2vecEmbeddings": "langchain_community.embeddings.model2vec",

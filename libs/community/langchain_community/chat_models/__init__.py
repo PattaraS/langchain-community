@@ -72,10 +72,8 @@ if TYPE_CHECKING:
         MiniMaxChat,
     )
     from langchain_community.chat_models.mlflow import (
+        ChatMLflowGateway,
         ChatMlflow,
-    )
-    from langchain_community.chat_models.mlflow_ai_gateway import (
-        ChatMLflowAIGateway,
     )
     from langchain_community.chat_models.mlx import (
         ChatMLX,
@@ -149,9 +147,9 @@ __all__ = [
     "ChatKinetica",
     "ChatKonko",
     "ChatMLX",
-    "ChatMLflowAIGateway",
-    "ChatMaritalk",
+    "ChatMLflowGateway",
     "ChatMlflow",
+    "ChatMaritalk",
     "ChatNebula",
     "ChatOCIGenAI",
     "ChatOCIModelDeployment",
@@ -197,10 +195,10 @@ _module_lookup = {
     "ChatJavelinAIGateway": "langchain_community.chat_models.javelin_ai_gateway",
     "ChatKinetica": "langchain_community.chat_models.kinetica",
     "ChatKonko": "langchain_community.chat_models.konko",
-    "ChatMLflowAIGateway": "langchain_community.chat_models.mlflow_ai_gateway",
+    "ChatMLflowGateway": "langchain_community.chat_models.mlflow",
+    "ChatMlflow": "langchain_community.chat_models.mlflow",
     "ChatMLX": "langchain_community.chat_models.mlx",
     "ChatMaritalk": "langchain_community.chat_models.maritalk",
-    "ChatMlflow": "langchain_community.chat_models.mlflow",
     "ChatNebula": "langchain_community.chat_models.symblai_nebula",
     "ChatOctoAI": "langchain_community.chat_models.octoai",
     "ChatOCIGenAI": "langchain_community.chat_models.oci_generative_ai",
