@@ -4,9 +4,11 @@ import warnings
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urlparse
 
+import requests as http_requests
+
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import LLM
-from pydantic import Field, PrivateAttr
+from pydantic import Field
 
 
 class MLflowGateway(LLM):
@@ -17,20 +19,13 @@ class MLflowGateway(LLM):
     LLM providers with built-in secrets management, fallback/retry, traffic
     splitting, and usage tracing — all configured through the MLflow UI.
 
-    To use, you should have the ``mlflow[genai]`` python package installed.
-    For more information, see https://mlflow.org/docs/latest/llms/gateway/index.html.
+    No ``mlflow`` dependency is required — this class communicates with the
+    gateway via its REST API.
+
+    For more information, see https://mlflow.org/docs/latest/genai/governance/ai-gateway/
 
     .. note::
         For chat-based models prefer :class:`~langchain_community.chat_models.ChatMLflowGateway`.
-
-    Setup:
-
-        Start an MLflow server and create a gateway endpoint in the UI::
-
-            mlflow server --host 127.0.0.1 --port 5000
-
-        Then open http://localhost:5000, navigate to **AI Gateway → Create Endpoint**,
-        and configure a provider. Provider API keys are stored encrypted on the server.
 
     Example:
 
@@ -60,21 +55,10 @@ class MLflowGateway(LLM):
     """Maximum number of tokens to generate."""
     extra_params: Dict[str, Any] = Field(default_factory=dict)
     """Any extra parameters to pass through to the endpoint."""
-    _client: Any = PrivateAttr()
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
         self._validate_uri()
-        try:
-            from mlflow.deployments import get_deploy_client
-
-            self._client = get_deploy_client(self.target_uri)
-        except ImportError as e:
-            raise ImportError(
-                "Failed to create the MLflow deployments client. "
-                "Please run `pip install mlflow[genai]` to install "
-                "required dependencies."
-            ) from e
 
     def _validate_uri(self) -> None:
         if self.target_uri == "databricks":
@@ -85,6 +69,11 @@ class MLflowGateway(LLM):
                 f"Invalid target URI: {self.target_uri}. "
                 f"The scheme must be one of {allowed}."
             )
+
+    @property
+    def _invocation_url(self) -> str:
+        base = self.target_uri.rstrip("/")
+        return f"{base}/gateway/{self.endpoint}/mlflow/invocations"
 
     @property
     def _default_params(self) -> Dict[str, Any]:
@@ -121,8 +110,13 @@ class MLflowGateway(LLM):
         if self.max_tokens is not None:
             data["max_tokens"] = self.max_tokens
 
-        resp = self._client.predict(endpoint=self.endpoint, inputs=data)
-        return resp["choices"][0]["text"]
+        resp = http_requests.post(
+            self._invocation_url,
+            json=data,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["text"]
 
     @property
     def _llm_type(self) -> str:

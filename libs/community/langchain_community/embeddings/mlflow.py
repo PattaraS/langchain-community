@@ -4,8 +4,10 @@ import warnings
 from typing import Any, Dict, Iterator, List
 from urllib.parse import urlparse
 
+import requests as http_requests
+
 from langchain_core.embeddings import Embeddings
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel
 
 
 def _chunk(texts: List[str], size: int) -> Iterator[List[str]]:
@@ -21,18 +23,10 @@ class MLflowGatewayEmbeddings(Embeddings, BaseModel):
     embedding providers with built-in secrets management, fallback/retry, and
     usage tracing — all configured through the MLflow UI.
 
-    To use, you should have the ``mlflow[genai]`` python package installed.
-    For more information, see https://mlflow.org/docs/latest/llms/gateway/index.html.
+    No ``mlflow`` dependency is required — this class communicates with the
+    gateway via its REST API.
 
-    Setup:
-
-        Start an MLflow server and create an embeddings gateway endpoint in the UI::
-
-            mlflow server --host 127.0.0.1 --port 5000
-
-        Then open http://localhost:5000, navigate to **AI Gateway → Create Endpoint**,
-        and configure an embeddings provider. Provider API keys are stored encrypted
-        on the server.
+    For more information, see https://mlflow.org/docs/latest/genai/governance/ai-gateway/
 
     Example:
 
@@ -55,25 +49,10 @@ class MLflowGatewayEmbeddings(Embeddings, BaseModel):
     """Extra parameters forwarded with every ``embed_query`` call."""
     documents_params: Dict[str, str] = {}
     """Extra parameters forwarded with every ``embed_documents`` call."""
-    _client: Any = PrivateAttr()
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
         self._validate_uri()
-        try:
-            from mlflow.deployments import get_deploy_client
-
-            self._client = get_deploy_client(self.target_uri)
-        except ImportError as e:
-            raise ImportError(
-                "Failed to create the MLflow deployments client. "
-                "Please run `pip install mlflow[genai]` to install "
-                "required dependencies."
-            ) from e
-
-    @property
-    def _mlflow_extras(self) -> str:
-        return "[genai]"
 
     def _validate_uri(self) -> None:
         if self.target_uri == "databricks":
@@ -85,14 +64,21 @@ class MLflowGatewayEmbeddings(Embeddings, BaseModel):
                 f"The scheme must be one of {allowed}."
             )
 
+    @property
+    def _invocation_url(self) -> str:
+        base = self.target_uri.rstrip("/")
+        return f"{base}/gateway/{self.endpoint}/mlflow/invocations"
+
     def embed(self, texts: List[str], params: Dict[str, str]) -> List[List[float]]:
         embeddings: List[List[float]] = []
         for txt in _chunk(texts, 20):
-            resp = self._client.predict(
-                endpoint=self.endpoint,
-                inputs={"input": txt, **params},
+            resp = http_requests.post(
+                self._invocation_url,
+                json={"input": txt, **params},
+                headers={"Content-Type": "application/json"},
             )
-            embeddings.extend(r["embedding"] for r in resp["data"])
+            resp.raise_for_status()
+            embeddings.extend(r["embedding"] for r in resp.json()["data"])
         return embeddings
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:

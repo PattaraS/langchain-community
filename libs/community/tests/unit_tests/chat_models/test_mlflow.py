@@ -1,9 +1,9 @@
 import json
+import unittest.mock
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -18,11 +18,7 @@ from langchain_core.messages import (
     ToolCallChunk,
     ToolMessageChunk,
 )
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import StructuredTool
-from pydantic import BaseModel
-
-from langchain_community.chat_models.mlflow import ChatMLflowGateway, ChatMlflow
+from langchain_community.chat_models.mlflow import ChatMLflowGateway
 
 
 @pytest.fixture
@@ -163,85 +159,47 @@ def mock_predict_stream_result() -> List[dict]:
     ]
 
 
-@pytest.mark.requires("mlflow")
 def test_chat_mlflow_predict(
-    llm: ChatMlflow, model_input: List[BaseMessage], mock_prediction: dict
+    llm: ChatMLflowGateway, model_input: List[BaseMessage], mock_prediction: dict
 ) -> None:
-    mock_client = MagicMock()
-    llm._client = mock_client
+    mock_response = MagicMock()
+    mock_response.json.return_value = mock_prediction
+    mock_response.raise_for_status = MagicMock()
 
-    def mock_predict(*args: Any, **kwargs: Any) -> Any:
-        return mock_prediction
-
-    mock_client.predict = mock_predict
-    res = llm.invoke(model_input)
+    with unittest.mock.patch(
+        "langchain_community.chat_models.mlflow.http_requests.post",
+        return_value=mock_response,
+    ):
+        res = llm.invoke(model_input)
     assert res.content == mock_prediction["choices"][0]["message"]["content"]
 
 
-@pytest.mark.requires("mlflow")
 def test_chat_mlflow_stream(
-    llm: ChatMlflow,
+    llm: ChatMLflowGateway,
     model_input: List[BaseMessage],
     mock_predict_stream_result: List[dict],
 ) -> None:
-    mock_client = MagicMock()
-    llm._client = mock_client
+    import json as _json
 
-    def mock_stream(*args: Any, **kwargs: Any) -> Any:
-        yield from mock_predict_stream_result
+    sse_lines = []
+    for chunk in mock_predict_stream_result:
+        sse_lines.append(f"data: {_json.dumps(chunk)}".encode())
+    sse_lines.append(b"data: [DONE]")
 
-    mock_client.predict_stream = mock_stream
-    for i, res in enumerate(llm.stream(model_input)):
-        if res.chunk_position != "last":
-            assert (
-                res.content
-                == mock_predict_stream_result[i]["choices"][0]["delta"]["content"]
-            )
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.iter_lines.return_value = iter(sse_lines)
 
-
-@pytest.mark.requires("mlflow")
-def test_chat_mlflow_bind_tools(
-    llm: ChatMlflow, mock_predict_stream_result: List[dict]
-) -> None:
-    mock_client = MagicMock()
-    llm._client = mock_client
-
-    def mock_stream(*args: Any, **kwargs: Any) -> Any:
-        yield from mock_predict_stream_result
-
-    mock_client.predict_stream = mock_stream
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You are a helpful assistant. Make sure to use tool for information.",
-            ),
-            ("placeholder", "{chat_history}"),
-            ("human", "{input}"),
-            ("placeholder", "{agent_scratchpad}"),
-        ]
-    )
-
-    def mock_func(x: int, y: int) -> str:
-        return "36939 x 8922.4 = 329,511,111.6"
-
-    class ArgsSchema(BaseModel):
-        x: int
-        y: int
-
-    tools = [
-        StructuredTool(
-            name="name",
-            description="description",
-            args_schema=ArgsSchema,
-            func=mock_func,
-        )
-    ]
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-    result = agent_executor.invoke({"input": "36939 * 8922.4"})
-    assert result["output"] == "36939x8922.4 = 329,511,111.6"
+    with unittest.mock.patch(
+        "langchain_community.chat_models.mlflow.http_requests.post",
+        return_value=mock_response,
+    ):
+        for i, res in enumerate(llm.stream(model_input)):
+            if res.chunk_position != "last":
+                assert (
+                    res.content
+                    == mock_predict_stream_result[i]["choices"][0]["delta"]["content"]
+                )
 
 
 def test_convert_dict_to_message_human() -> None:

@@ -17,6 +17,8 @@ from typing import (
 )
 from urllib.parse import urlparse
 
+import requests as http_requests
+
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.base import LanguageModelInput
@@ -43,13 +45,12 @@ from langchain_core.output_parsers.openai_tools import (
     parse_tool_call,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import (
     BaseModel,
     Field,
-    PrivateAttr,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,8 +64,10 @@ class ChatMLflowGateway(BaseChatModel):
     LLM providers with built-in secrets management, fallback/retry, traffic
     splitting, and usage tracing — all configured through the MLflow UI.
 
-    To use, you should have the ``mlflow[genai]`` python package installed.
-    For more information, see https://mlflow.org/docs/latest/llms/gateway/index.html.
+    No ``mlflow`` dependency is required — this class communicates with the
+    gateway via its REST API.
+
+    For more information, see https://mlflow.org/docs/latest/genai/governance/ai-gateway/
 
     Setup:
 
@@ -104,25 +107,10 @@ class ChatMLflowGateway(BaseChatModel):
     """Maximum number of tokens to generate."""
     extra_params: dict = Field(default_factory=dict)
     """Any extra parameters to pass through to the endpoint."""
-    _client: Any = PrivateAttr()
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
         self._validate_uri()
-        try:
-            from mlflow.deployments import get_deploy_client
-
-            self._client = get_deploy_client(self.target_uri)
-        except ImportError as e:
-            raise ImportError(
-                "Failed to create the MLflow deployments client. "
-                "Please run `pip install mlflow[genai]` to install "
-                "required dependencies."
-            ) from e
-
-    @property
-    def _mlflow_extras(self) -> str:
-        return "[genai]"
 
     def _validate_uri(self) -> None:
         if self.target_uri == "databricks":
@@ -135,8 +123,13 @@ class ChatMLflowGateway(BaseChatModel):
             )
 
     @property
+    def _invocation_url(self) -> str:
+        base = self.target_uri.rstrip("/")
+        return f"{base}/gateway/{self.endpoint}/mlflow/invocations"
+
+    @property
     def _default_params(self) -> Dict[str, Any]:
-        params: Dict[str, Any] = {
+        return {
             "target_uri": self.target_uri,
             "endpoint": self.endpoint,
             "temperature": self.temperature,
@@ -145,7 +138,6 @@ class ChatMLflowGateway(BaseChatModel):
             "max_tokens": self.max_tokens,
             "extra_params": self.extra_params,
         }
-        return params
 
     def _prepare_inputs(
         self,
@@ -154,7 +146,7 @@ class ChatMLflowGateway(BaseChatModel):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         message_dicts = [
-            ChatMLflowGateway._convert_message_to_dict(message) for message in messages
+            ChatMLflowGateway._convert_message_to_dict(m) for m in messages
         ]
         data: Dict[str, Any] = {
             "messages": message_dicts,
@@ -167,7 +159,6 @@ class ChatMLflowGateway(BaseChatModel):
             data["stop"] = stop
         if self.max_tokens is not None:
             data["max_tokens"] = self.max_tokens
-
         return data
 
     def _generate(
@@ -178,24 +169,13 @@ class ChatMLflowGateway(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         data = self._prepare_inputs(messages, stop, **kwargs)
-        resp = self._client.predict(endpoint=self.endpoint, inputs=data)
-        return ChatMLflowGateway._create_chat_result(resp)
-
-    def stream(
-        self,
-        input: LanguageModelInput,
-        config: Optional[RunnableConfig] = None,
-        *,
-        stop: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> Iterator[AIMessageChunk]:
-        # Fall back to non-streaming invoke if the client does not support streaming.
-        if not hasattr(self._client, "predict_stream"):
-            yield cast(
-                AIMessageChunk, self.invoke(input, config=config, stop=stop, **kwargs)
-            )
-        else:
-            yield from super().stream(input, config, stop=stop, **kwargs)
+        resp = http_requests.post(
+            self._invocation_url,
+            json=data,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        return ChatMLflowGateway._create_chat_result(resp.json())
 
     def _stream(
         self,
@@ -205,37 +185,57 @@ class ChatMLflowGateway(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         data = self._prepare_inputs(messages, stop, **kwargs)
-        chunk_iter = self._client.predict_stream(endpoint=self.endpoint, inputs=data)
+        data["stream"] = True
+
+        resp = http_requests.post(
+            self._invocation_url,
+            json=data,
+            headers={"Content-Type": "application/json"},
+            stream=True,
+        )
+        resp.raise_for_status()
+
         first_chunk_role = None
-        for chunk in chunk_iter:
-            if chunk["choices"]:
-                choice = chunk["choices"][0]
-                chunk_delta = choice["delta"]
-                if first_chunk_role is None:
-                    first_chunk_role = chunk_delta.get("role")
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            decoded = line.decode("utf-8")
+            if not decoded.startswith("data: "):
+                continue
+            payload = decoded[len("data: "):]
+            if payload.strip() == "[DONE]":
+                break
+            chunk = json.loads(payload)
+            if not chunk.get("choices"):
+                continue
 
-                chunk_message = ChatMLflowGateway._convert_delta_to_message_chunk(
-                    chunk_delta, first_chunk_role
+            choice = chunk["choices"][0]
+            chunk_delta = choice.get("delta", {})
+            if first_chunk_role is None:
+                first_chunk_role = chunk_delta.get("role")
+
+            chunk_message = ChatMLflowGateway._convert_delta_to_message_chunk(
+                chunk_delta, first_chunk_role
+            )
+
+            generation_info = {}
+            if finish_reason := choice.get("finish_reason"):
+                generation_info["finish_reason"] = finish_reason
+            if logprobs := choice.get("logprobs"):
+                generation_info["logprobs"] = logprobs
+
+            gen_chunk = ChatGenerationChunk(
+                message=chunk_message, generation_info=generation_info or None
+            )
+
+            if run_manager:
+                run_manager.on_llm_new_token(
+                    gen_chunk.text,
+                    chunk=gen_chunk,
+                    logprobs=generation_info.get("logprobs"),
                 )
 
-                generation_info = {}
-                if finish_reason := choice.get("finish_reason"):
-                    generation_info["finish_reason"] = finish_reason
-                if logprobs := choice.get("logprobs"):
-                    generation_info["logprobs"] = logprobs
-
-                gen_chunk = ChatGenerationChunk(
-                    message=chunk_message, generation_info=generation_info or None
-                )
-
-                if run_manager:
-                    run_manager.on_llm_new_token(
-                        gen_chunk.text,
-                        chunk=gen_chunk,
-                        logprobs=generation_info.get("logprobs"),
-                    )
-
-                yield gen_chunk
+            yield gen_chunk
 
     @property
     def _identifying_params(self) -> Dict[str, Any]:
@@ -417,9 +417,7 @@ class ChatMLflowGateway(BaseChatModel):
                         "function": {"name": tool_choice},
                     }
             elif isinstance(tool_choice, dict):
-                tool_names = [
-                    t["function"]["name"] for t in formatted_tools
-                ]
+                tool_names = [t["function"]["name"] for t in formatted_tools]
                 if not any(
                     tool_name == tool_choice["function"]["name"]
                     for tool_name in tool_names
